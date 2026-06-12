@@ -1,0 +1,16 @@
+{
+  "name": "trem-do-hexa-bot",
+  "version": "1.0.0",
+  "description": "Bot que coloca os resultados oficiais dos jogos no bolão Trem do Hexa (Firestore), automatizando o ranking da galera.",
+  "main": "bot-resultados.js",
+  "scripts": {
+    "start": "node bot-resultados.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "firebase": "^10.12.2"
+  },
+  "private": true
+}

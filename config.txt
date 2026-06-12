@@ -1,0 +1,11 @@
+# ===== Configuração do bot do Trem do Hexa =====
+# Edite as linhas abaixo e salve este arquivo. Não precisa de aspas.
+
+# De onde vêm os resultados: football-data, openfootball ou manual
+FONTE=football-data
+
+# >>> COLE AQUI O SEU TOKEN do football-data.org (veio por e-mail) <<<
+FOOTBALL_DATA_TOKEN=c74b3765e7d6426cb40a228dadae5635
+
+# Sobrescrever jogos que você já preencheu na mão? 0 = não, 1 = sim
+SOBRESCREVER=0
