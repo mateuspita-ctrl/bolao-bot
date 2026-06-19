@@ -167,7 +167,7 @@ function mergeResults(current, jogos, opts) {
   opts = opts || {};
   var index = opts.index || buildIndex();
   var res = Object.assign(
-    { campeao: '', vice: '', artilheiro: '', gols: '', grupos: {}, classificacoes: {}, knockout: {} },
+    { campeao: '', vice: '', artilheiro: '', gols: '', grupos: {}, classificacoes: {}, knockout: {}, datas: {} },
     current || {}
   );
   res.grupos = Object.assign({}, res.grupos);
@@ -196,8 +196,20 @@ function mergeResults(current, jogos, opts) {
     var st = calcStandings(L, res.grupos);
     if (st) res.classificacoes[L] = st;
   });
+
+  // DATAS dos jogos (pra destacar "os jogos do dia" no site).
+  // Vêm da "agenda" da fonte; cada jogo é mapeado ao seu slot (X-i).
+  res.datas = Object.assign({}, res.datas);
+  (opts.agenda || []).forEach(function (g) {
+    if (!g || !g.date) return;
+    var m = mapGame(g.home, g.away, 0, 0, index);
+    if (m.error) return; // jogo de mata-mata ou nome não reconhecido -> ignora em silêncio
+    res.datas[m.key] = g.date;
+  });
+  var datasChanged = JSON.stringify(res.datas) !== JSON.stringify((current || {}).datas || {});
+
   res.ultimaAtualizacao = opts.now || new Date().toLocaleString('pt-BR');
-  return { res: res, added: added, skipped: skipped, errors: errors };
+  return { res: res, added: added, skipped: skipped, errors: errors, datasChanged: datasChanged };
 }
 
 /* ============================================================
@@ -210,18 +222,32 @@ async function fetchFootballData() {
   if (!FOOTBALL_DATA_TOKEN || /COLE_SEU_TOKEN/i.test(FOOTBALL_DATA_TOKEN)) {
     throw new Error('Falta o token do football-data.org. Abra o arquivo config.txt e cole o seu token na linha FOOTBALL_DATA_TOKEN= (a chave grátis vem por e-mail; também aparece em football-data.org, na sua conta).');
   }
-  var r = await fetch('https://api.football-data.org/v4/competitions/WC/matches?status=FINISHED', {
+  // Busca TODOS os jogos (não só os terminados) pra ter também a DATA de cada partida.
+  var r = await fetch('https://api.football-data.org/v4/competitions/WC/matches', {
     headers: { 'X-Auth-Token': FOOTBALL_DATA_TOKEN }
   });
   if (!r.ok) throw new Error('football-data.org respondeu HTTP ' + r.status);
   var data = await r.json();
-  return (data.matches || [])
+  var matches = data.matches || [];
+  var jogos = matches
     .filter(function (m) {
       return m.status === 'FINISHED' && m.score && m.score.fullTime && m.score.fullTime.home != null;
     })
     .map(function (m) {
       return { home: m.homeTeam.name, away: m.awayTeam.name, hg: m.score.fullTime.home, ag: m.score.fullTime.away };
     });
+  // Agenda: jogos de FASE DE GRUPOS com a data/hora oficial (utcDate, ISO).
+  // Identifica jogo de grupo pela marcação oficial "group" (ex.: GROUP_A); cai pro "stage" como reforço.
+  // O mapGame ainda valida que os dois times são do MESMO grupo do app, então mata-mata é descartado.
+  var agenda = matches
+    .filter(function (m) {
+      return (m.group != null || m.stage === 'GROUP_STAGE')
+        && m.homeTeam && m.awayTeam && m.homeTeam.name && m.awayTeam.name && m.utcDate;
+    })
+    .map(function (m) {
+      return { home: m.homeTeam.name, away: m.awayTeam.name, date: m.utcDate };
+    });
+  return { jogos: jogos, agenda: agenda };
 }
 
 // openfootball (sem chave; dados públicos no GitHub, atualizam ~1x/dia)
@@ -230,16 +256,18 @@ async function fetchOpenFootball() {
   var r = await fetch(url);
   if (!r.ok) throw new Error('openfootball respondeu HTTP ' + r.status);
   var data = await r.json();
-  return (data.matches || [])
-    .filter(function (m) {
-      return m.group && /^Group/i.test(m.group) && m.score && m.score.ft && m.score.ft.length === 2;
-    })
-    .map(function (m) {
-      return { home: m.team1, away: m.team2, hg: m.score.ft[0], ag: m.score.ft[1] };
-    });
+  var grupos = (data.matches || []).filter(function (m) { return m.group && /^Group/i.test(m.group); });
+  var jogos = grupos
+    .filter(function (m) { return m.score && m.score.ft && m.score.ft.length === 2; })
+    .map(function (m) { return { home: m.team1, away: m.team2, hg: m.score.ft[0], ag: m.score.ft[1] }; });
+  // Agenda: data de cada jogo de grupo (openfootball traz a data no formato AAAA-MM-DD).
+  var agenda = grupos
+    .filter(function (m) { return m.date; })
+    .map(function (m) { return { home: m.team1, away: m.team2, date: m.date }; });
+  return { jogos: jogos, agenda: agenda };
 }
 
-// manual: lê resultados-manuais.json no formato [{home, away, hg, ag}, ...]
+// manual: lê resultados-manuais.json no formato [{home, away, hg, ag, date?}, ...]
 async function fetchManual() {
   var fs = require('fs');
   var path = require('path');
@@ -247,7 +275,11 @@ async function fetchManual() {
   if (!fs.existsSync(file)) {
     throw new Error('Arquivo resultados-manuais.json não encontrado. Crie-o com [{"home","away","hg","ag"}, ...].');
   }
-  return JSON.parse(fs.readFileSync(file, 'utf-8'));
+  var arr = JSON.parse(fs.readFileSync(file, 'utf-8'));
+  var agenda = (arr || [])
+    .filter(function (g) { return g && g.date; })
+    .map(function (g) { return { home: g.home, away: g.away, date: g.date }; });
+  return { jogos: arr, agenda: agenda };
 }
 
 async function fetchResults() {
@@ -272,15 +304,17 @@ async function main() {
   console.log('🤖 Trem do Hexa — bot de resultados');
   console.log('   Fonte: ' + FONTE + (SOBRESCREVER ? '  (sobrescrevendo)' : '  (preserva o que já existe)'));
 
-  console.log('→ buscando jogos terminados...');
-  var jogos = await fetchResults();
-  console.log('   ' + jogos.length + ' jogo(s) terminado(s) na fonte.');
+  console.log('→ buscando jogos e agenda...');
+  var fonte = await fetchResults();
+  var jogos = fonte.jogos || [];
+  var agenda = fonte.agenda || [];
+  console.log('   ' + jogos.length + ' jogo(s) terminado(s) e ' + agenda.length + ' jogo(s) na agenda (com data).');
 
   console.log('→ lendo resultados atuais do Firestore...');
   var snap = await fs.getDoc(ref);
   var current = snap.exists() ? snap.data() : {};
 
-  var out = mergeResults(current, jogos, { index: buildIndex(), sobrescrever: SOBRESCREVER });
+  var out = mergeResults(current, jogos, { index: buildIndex(), sobrescrever: SOBRESCREVER, agenda: agenda });
 
   if (out.errors.length) {
     console.log('\n⚠️  ' + out.errors.length + ' jogo(s) não mapeado(s) (provável diferença de nome — ignorados):');
@@ -291,13 +325,19 @@ async function main() {
     out.skipped.forEach(function (s) { console.log('     - ' + s); });
   }
 
-  if (out.added.length === 0) {
-    console.log('\n✅ Nada novo pra gravar. Tudo já está atualizado.');
+  var nDatas = Object.keys(out.res.datas || {}).length;
+  if (out.added.length === 0 && !out.datasChanged) {
+    console.log('\n✅ Nada novo pra gravar. Tudo já está atualizado. (' + nDatas + ' jogo(s) com data salva.)');
     process.exit(0);
   }
 
-  console.log('\n📝 ' + out.added.length + ' jogo(s) novo(s):');
-  out.added.forEach(function (a) { console.log('     + ' + a); });
+  if (out.added.length) {
+    console.log('\n📝 ' + out.added.length + ' jogo(s) novo(s):');
+    out.added.forEach(function (a) { console.log('     + ' + a); });
+  }
+  if (out.datasChanged) {
+    console.log('\n🗓️  datas dos jogos atualizadas (' + nDatas + ' jogo(s) com data).');
+  }
 
   console.log('\n→ gravando no Firestore (config/resultados)...');
   await fs.setDoc(ref, out.res); // grava o doc completo, igual ao admin
