@@ -78,7 +78,7 @@ var GROUPS = {
   E: [['Alemanha','Germany'],['Curaçao','Curacao'],['Costa do Marfim','Ivory Coast','Côte d\'Ivoire','Cote d\'Ivoire'],['Equador','Ecuador']],
   F: [['Holanda','Netherlands','Holland'],['Japão','Japan'],['Tunísia','Tunisia'],['Suécia','Sweden']],
   G: [['Bélgica','Belgium'],['Egito','Egypt'],['Irã','Iran','IR Iran'],['Nova Zelândia','New Zealand']],
-  H: [['Espanha','Spain'],['Cabo Verde','Cape Verde'],['Arábia Saudita','Saudi Arabia'],['Uruguai','Uruguay']],
+  H: [['Espanha','Spain'],['Cabo Verde','Cape Verde','Cape Verde Islands','Cabo Verde Islands'],['Arábia Saudita','Saudi Arabia'],['Uruguai','Uruguay']],
   I: [['França','France'],['Senegal'],['Noruega','Norway'],['Iraque','Iraq']],
   J: [['Argentina'],['Argélia','Algeria'],['Áustria','Austria'],['Jordânia','Jordan']],
   K: [['Portugal'],['Uzbequistão','Uzbekistan'],['Colômbia','Colombia'],['RD Congo','DR Congo','Congo DR','Democratic Republic of the Congo','Congo']],
