@@ -5,9 +5,17 @@
    TREM DO HEXA — Bot de resultados oficiais
    ------------------------------------------------------------
    Lê os jogos já terminados de uma fonte oficial e grava os
-   placares no MESMO documento que o admin usa (config/resultados),
-   atualizando a classificação dos grupos. Assim o ranking da galera
-   se atualiza sozinho.
+   placares no MESMO documento que o admin usa (config/resultados):
+     • fase de grupos -> res.grupos + res.classificacoes
+     • MATA-MATA (16 avos até a final) -> res.knockout
+     • datas dos jogos -> res.datas (grupos e mata-mata)
+   Assim o ranking e o "palpite da galera" se atualizam sozinhos.
+
+   No mata-mata, o bot reconstrói o chaveamento a partir das
+   classificações + dos resultados já gravados e descobre o confronto
+   de cada jogo pelos dois times — então funciona rodada a rodada
+   (16 avos, oitavas, quartas, semis, final e 3º lugar), inclusive
+   com desempate por pênaltis (pc/pf).
 
    NÃO mexe no seu admin: o admin continua abrindo, mostrando os
    resultados (inclusive os que o bot colocou) e deixando você
@@ -88,6 +96,19 @@ var LETTERS = Object.keys(GROUPS);
 // Mesma matriz de confrontos do app: slot -> [idxMandante, idxVisitante]
 var MATCH_PAIRS = [[0,1],[2,3],[0,2],[1,3],[0,3],[1,2]];
 
+/* ===== MATA-MATA: estrutura do chaveamento (a MESMA do app) =====
+   Cada slot dos 16 avos é [colocação, colocação]. O resto das rodadas
+   é derivado por propagação: r16[i] = vencedor(r32, 2i) x vencedor(r32, 2i+1),
+   e assim por diante; final e 3º lugar saem das semifinais. */
+var MATCH_LABELS_R32 = [
+  ['1º Grupo E','3º Grupo D'],['1º Grupo I','3º Grupo F'],['2º Grupo A','2º Grupo B'],['1º Grupo F','2º Grupo C'],
+  ['2º Grupo K','2º Grupo L'],['1º Grupo H','2º Grupo J'],['1º Grupo D','3º Grupo B'],['1º Grupo G','3º Grupo I'],
+  ['1º Grupo C','2º Grupo F'],['2º Grupo E','2º Grupo I'],['1º Grupo A','3º Grupo E'],['1º Grupo L','3º Grupo K'],
+  ['1º Grupo J','2º Grupo H'],['2º Grupo D','2º Grupo G'],['1º Grupo B','3º Grupo J'],['1º Grupo K','3º Grupo L']
+];
+var KO_ROUND_ORDER = ['r32','r16','qf','sf','f','3p'];
+var KO_COUNTS = { r32:16, r16:8, qf:4, sf:2, f:1, '3p':1 };
+
 /* ============================================================
    LÓGICA PURA (testável, sem rede)
    ============================================================ */
@@ -162,6 +183,148 @@ function calcStandings(letter, grupos) {
   return rows.map(function (r) { return r.name; });
 }
 
+/* ============================================================
+   MATA-MATA — lógica pura (testável, sem rede)
+   ============================================================ */
+
+// '1º Grupo E' -> nome do time na 1ª posição do grupo E (ou null se o grupo ainda não classificou)
+function resolverColocacao(label, classificacoes) {
+  var m = /^([123])º Grupo ([A-L])$/.exec(label);
+  if (!m) return null;
+  var pos = parseInt(m[1], 10) - 1, g = m[2];
+  var arr = classificacoes && classificacoes[g];
+  return (arr && arr[pos]) ? arr[pos] : null;
+}
+
+// vencedor de um confronto, a partir do slot {home,away} e do resultado {c,f,pc,pf}
+// c = gols de home; f = gols de away; pc/pf = pênaltis (desempate). MESMA lógica do app.
+function koWinnerName(slot, r) {
+  if (!slot || !slot.home || !slot.away || !r || r.status !== 'finished') return null;
+  var c = parseInt(r.c, 10), f = parseInt(r.f, 10);
+  if (isNaN(c) || isNaN(f)) return null;
+  if (c > f) return slot.home;
+  if (f > c) return slot.away;
+  var pc = parseInt(r.pc, 10), pf = parseInt(r.pf, 10);
+  if (!isNaN(pc) && !isNaN(pf)) { if (pc > pf) return slot.home; if (pf > pc) return slot.away; }
+  return null; // empate sem pênaltis -> ainda indefinido
+}
+function koLoserName(slot, r) {
+  var w = koWinnerName(slot, r); if (!w) return null;
+  return w === slot.home ? slot.away : slot.home;
+}
+
+// monta o bracket inteiro (nomes do app, SEM bandeira) a partir do que já existe em
+// knockout + das classificações dos grupos. Slots ainda indefinidos vêm como {home:null,away:null}.
+function buildBracket(knockout, classificacoes) {
+  var ko = knockout || {};
+  var bk = { r32:[], r16:[], qf:[], sf:[], f:[], '3p':[] };
+  MATCH_LABELS_R32.forEach(function (p) {
+    bk.r32.push({ home: resolverColocacao(p[0], classificacoes), away: resolverColocacao(p[1], classificacoes) });
+  });
+  function W(rid, i) { return koWinnerName(bk[rid][i], ko[rid + '-' + i]); }
+  function L(rid, i) { return koLoserName(bk[rid][i], ko[rid + '-' + i]); }
+  var i;
+  for (i = 0; i < 8; i++) bk.r16.push({ home: W('r32', 2*i), away: W('r32', 2*i+1) });
+  for (i = 0; i < 4; i++) bk.qf.push({ home: W('r16', 2*i), away: W('r16', 2*i+1) });
+  for (i = 0; i < 2; i++) bk.sf.push({ home: W('qf', 2*i), away: W('qf', 2*i+1) });
+  bk.f.push({ home: W('sf', 0), away: W('sf', 1) });
+  bk['3p'].push({ home: L('sf', 0), away: L('sf', 1) });
+  return bk;
+}
+
+// funde os jogos de mata-mata no objeto knockout.
+// koJogos: lista de { home, away, hg, ag, ph?, pa? } (nomes da fonte; ph/pa = pênaltis).
+// Processa rodada a rodada, propagando os vencedores — assim cada jogo é casado ao
+// confronto certo pelos dois times, mesmo nas rodadas que dependem de quem passou.
+function mergeKnockout(currentKO, koJogos, classificacoes, opts) {
+  opts = opts || {};
+  var index = opts.index || buildIndex();
+  var sobrescrever = !!opts.sobrescrever;
+  var ko = Object.assign({}, currentKO || {});
+  var added = [], skipped = [], errors = [];
+
+  var resolved = (koJogos || []).map(function (g) {
+    var h = index[norm(g.home)], a = index[norm(g.away)];
+    return {
+      raw: g,
+      homeApp: h ? h.nomeApp : null,
+      awayApp: a ? a.nomeApp : null,
+      hg: parseInt(g.hg, 10), ag: parseInt(g.ag, 10),
+      ph: (g.ph == null ? null : parseInt(g.ph, 10)),
+      pa: (g.pa == null ? null : parseInt(g.pa, 10)),
+      used: false
+    };
+  });
+
+  KO_ROUND_ORDER.forEach(function (rid) {
+    var bk = buildBracket(ko, classificacoes); // recomputa com o que já gravamos nas rodadas anteriores
+    var slots = bk[rid], count = KO_COUNTS[rid];
+    for (var i = 0; i < count; i++) {
+      var slot = slots[i];
+      if (!slot || !slot.home || !slot.away) continue; // confronto ainda indefinido nesta rodada
+      var key = rid + '-' + i;
+
+      var jg = null;
+      for (var j = 0; j < resolved.length; j++) {
+        var r = resolved[j];
+        if (r.used || r.homeApp == null || r.awayApp == null || isNaN(r.hg) || isNaN(r.ag)) continue;
+        var bate = (r.homeApp === slot.home && r.awayApp === slot.away) ||
+                   (r.homeApp === slot.away && r.awayApp === slot.home);
+        if (bate) { jg = r; break; }
+      }
+      if (!jg) continue;
+      jg.used = true;
+
+      // orienta c/f (e pênaltis) para a ordem do slot (home/away do bracket)
+      var c, f, pc, pf;
+      if (jg.homeApp === slot.home) { c = jg.hg; f = jg.ag; pc = jg.ph; pf = jg.pa; }
+      else { c = jg.ag; f = jg.hg; pc = jg.pa; pf = jg.ph; }
+
+      var novo = { c: c, f: f, status: 'finished' };
+      if (pc != null && pf != null && !isNaN(pc) && !isNaN(pf)) { novo.pc = pc; novo.pf = pf; }
+
+      var ex = ko[key];
+      if (ex && ex.status === 'finished' && !sobrescrever) {
+        if (parseInt(ex.c,10) !== c || parseInt(ex.f,10) !== f) {
+          skipped.push(key + ' (já tinha ' + ex.c + 'x' + ex.f + ', mantido; fonte diz ' + c + 'x' + f + ')');
+        }
+        continue;
+      }
+      if (ex && ex.status === 'finished' && parseInt(ex.c,10) === c && parseInt(ex.f,10) === f &&
+          String(ex.pc) === String(novo.pc) && String(ex.pf) === String(novo.pf)) continue; // idêntico
+
+      ko[key] = novo;
+      var penTxt = (novo.pc != null) ? ' (pên ' + novo.pc + 'x' + novo.pf + ')' : '';
+      added.push(slot.home + ' ' + c + ' x ' + f + ' ' + slot.away + penTxt + '  [' + key + ']');
+    }
+  });
+
+  return { knockout: ko, added: added, skipped: skipped, errors: errors };
+}
+
+// datas dos jogos de mata-mata -> { 'rd-i': date }. Só casa quando os dois times
+// do confronto já são conhecidos (bracket propagado).
+function placeKoDates(koAgenda, knockout, classificacoes, index) {
+  index = index || buildIndex();
+  var bracket = buildBracket(knockout, classificacoes);
+  var out = {};
+  (koAgenda || []).forEach(function (g) {
+    if (!g || !g.date) return;
+    var h = index[norm(g.home)], a = index[norm(g.away)];
+    if (!h || !a) return;
+    var hn = h.nomeApp, an = a.nomeApp;
+    KO_ROUND_ORDER.forEach(function (rid) {
+      var slots = bracket[rid];
+      for (var i = 0; i < KO_COUNTS[rid]; i++) {
+        var s = slots[i];
+        if (!s || !s.home || !s.away) continue;
+        if ((s.home === hn && s.away === an) || (s.home === an && s.away === hn)) out[rid + '-' + i] = g.date;
+      }
+    });
+  });
+  return out;
+}
+
 // funde os jogos novos no doc atual, preservando tudo o que o bot não gerencia
 function mergeResults(current, jogos, opts) {
   opts = opts || {};
@@ -197,15 +360,26 @@ function mergeResults(current, jogos, opts) {
     if (st) res.classificacoes[L] = st;
   });
 
-  // DATAS dos jogos (pra destacar "os jogos do dia" no site).
+  // ===== MATA-MATA: funde os jogos do mata-mata em res.knockout =====
+  // (usa as classificações acima pra montar os 16 avos; o resto sai por propagação)
+  var koOut = mergeKnockout(res.knockout, opts.koJogos || [], res.classificacoes, { index: index, sobrescrever: opts.sobrescrever });
+  res.knockout = koOut.knockout;
+  koOut.added.forEach(function (a) { added.push(a); });
+  koOut.skipped.forEach(function (s) { skipped.push(s); });
+  koOut.errors.forEach(function (e) { errors.push(e); });
+
+  // DATAS dos jogos (pra destacar "os jogos do dia" no site e revelar a rodada na galera).
   // Vêm da "agenda" da fonte; cada jogo é mapeado ao seu slot (X-i).
   res.datas = Object.assign({}, res.datas);
   (opts.agenda || []).forEach(function (g) {
     if (!g || !g.date) return;
     var m = mapGame(g.home, g.away, 0, 0, index);
-    if (m.error) return; // jogo de mata-mata ou nome não reconhecido -> ignora em silêncio
+    if (m.error) return; // jogo de mata-mata ou nome não reconhecido -> tratado abaixo
     res.datas[m.key] = g.date;
   });
+  // DATAS do mata-mata (rd-i) — só entram quando os dois times do confronto já são conhecidos.
+  var koDatas = placeKoDates(opts.koAgenda || [], res.knockout, res.classificacoes, index);
+  Object.keys(koDatas).forEach(function (k) { res.datas[k] = koDatas[k]; });
   var datasChanged = JSON.stringify(res.datas) !== JSON.stringify((current || {}).datas || {});
 
   res.ultimaAtualizacao = opts.now || new Date().toLocaleString('pt-BR');
@@ -229,25 +403,39 @@ async function fetchFootballData() {
   if (!r.ok) throw new Error('football-data.org respondeu HTTP ' + r.status);
   var data = await r.json();
   var matches = data.matches || [];
-  var jogos = matches
-    .filter(function (m) {
-      return m.status === 'FINISHED' && m.score && m.score.fullTime && m.score.fullTime.home != null;
-    })
+
+  function ehGrupo(m) { return (m.group != null) || m.stage === 'GROUP_STAGE'; }
+  function terminou(m) { return m.status === 'FINISHED' && m.score && m.score.fullTime && m.score.fullTime.home != null; }
+
+  // FASE DE GRUPOS terminada
+  var jogos = matches.filter(function (m) { return ehGrupo(m) && terminou(m); })
     .map(function (m) {
       return { home: m.homeTeam.name, away: m.awayTeam.name, hg: m.score.fullTime.home, ag: m.score.fullTime.away };
     });
-  // Agenda: jogos de FASE DE GRUPOS com a data/hora oficial (utcDate, ISO).
-  // Identifica jogo de grupo pela marcação oficial "group" (ex.: GROUP_A); cai pro "stage" como reforço.
-  // O mapGame ainda valida que os dois times são do MESMO grupo do app, então mata-mata é descartado.
-  var agenda = matches
-    .filter(function (m) {
-      return (m.group != null || m.stage === 'GROUP_STAGE')
-        && m.homeTeam && m.awayTeam && m.homeTeam.name && m.awayTeam.name && m.utcDate;
-    })
+
+  // MATA-MATA terminado (com pênaltis quando houver). c/f = placar no fim do tempo normal/prorrogação.
+  var koJogos = matches.filter(function (m) { return !ehGrupo(m) && terminou(m); })
     .map(function (m) {
-      return { home: m.homeTeam.name, away: m.awayTeam.name, date: m.utcDate };
+      var ph = null, pa = null;
+      if (m.score.penalties && m.score.penalties.home != null) { ph = m.score.penalties.home; pa = m.score.penalties.away; }
+      // Decidido nos pênaltis mas a fonte não trouxe o placar do shootout:
+      // codifica só o vencedor (1x0) pra o chaveamento conseguir avançar.
+      if (ph == null && m.score.duration === 'PENALTY_SHOOTOUT' && m.score.winner) {
+        if (m.score.winner === 'HOME_TEAM') { ph = 1; pa = 0; }
+        else if (m.score.winner === 'AWAY_TEAM') { ph = 0; pa = 1; }
+      }
+      return { home: m.homeTeam.name, away: m.awayTeam.name, hg: m.score.fullTime.home, ag: m.score.fullTime.away, ph: ph, pa: pa };
     });
-  return { jogos: jogos, agenda: agenda };
+
+  // Agenda (data/hora oficial, ISO) — separada em grupos e mata-mata.
+  var agenda = matches.filter(function (m) {
+      return ehGrupo(m) && m.homeTeam && m.awayTeam && m.homeTeam.name && m.awayTeam.name && m.utcDate;
+    }).map(function (m) { return { home: m.homeTeam.name, away: m.awayTeam.name, date: m.utcDate }; });
+  var koAgenda = matches.filter(function (m) {
+      return !ehGrupo(m) && m.homeTeam && m.awayTeam && m.homeTeam.name && m.awayTeam.name && m.utcDate;
+    }).map(function (m) { return { home: m.homeTeam.name, away: m.awayTeam.name, date: m.utcDate }; });
+
+  return { jogos: jogos, koJogos: koJogos, agenda: agenda, koAgenda: koAgenda };
 }
 
 // openfootball (sem chave; dados públicos no GitHub, atualizam ~1x/dia)
@@ -256,7 +444,8 @@ async function fetchOpenFootball() {
   var r = await fetch(url);
   if (!r.ok) throw new Error('openfootball respondeu HTTP ' + r.status);
   var data = await r.json();
-  var grupos = (data.matches || []).filter(function (m) { return m.group && /^Group/i.test(m.group); });
+  var todos = data.matches || [];
+  var grupos = todos.filter(function (m) { return m.group && /^Group/i.test(m.group); });
   var jogos = grupos
     .filter(function (m) { return m.score && m.score.ft && m.score.ft.length === 2; })
     .map(function (m) { return { home: m.team1, away: m.team2, hg: m.score.ft[0], ag: m.score.ft[1] }; });
@@ -264,22 +453,44 @@ async function fetchOpenFootball() {
   var agenda = grupos
     .filter(function (m) { return m.date; })
     .map(function (m) { return { home: m.team1, away: m.team2, date: m.date }; });
-  return { jogos: jogos, agenda: agenda };
+
+  // MATA-MATA: jogos que NÃO são de grupo (rodadas eliminatórias). Pênaltis em score.p quando houver.
+  var koMatches = todos.filter(function (m) { return !(m.group && /^Group/i.test(m.group)); });
+  var koJogos = koMatches
+    .filter(function (m) { return m.score && m.score.ft && m.score.ft.length === 2 && m.team1 && m.team2; })
+    .map(function (m) {
+      var ph = null, pa = null;
+      if (m.score.p && m.score.p.length === 2) { ph = m.score.p[0]; pa = m.score.p[1]; }
+      return { home: m.team1, away: m.team2, hg: m.score.ft[0], ag: m.score.ft[1], ph: ph, pa: pa };
+    });
+  var koAgenda = koMatches
+    .filter(function (m) { return m.date && m.team1 && m.team2; })
+    .map(function (m) { return { home: m.team1, away: m.team2, date: m.date }; });
+
+  return { jogos: jogos, koJogos: koJogos, agenda: agenda, koAgenda: koAgenda };
 }
 
 // manual: lê resultados-manuais.json no formato [{home, away, hg, ag, date?}, ...]
+// manual: lê resultados-manuais.json no formato [{home, away, hg, ag, ph?, pa?, date?}, ...]
+// ph/pa = pênaltis (opcional, p/ jogos de mata-mata decididos nas penalidades).
+// Os jogos de mata-mata são reconhecidos automaticamente pelo chaveamento (pelos dois times).
 async function fetchManual() {
   var fs = require('fs');
   var path = require('path');
   var file = path.join(__dirname, 'resultados-manuais.json');
   if (!fs.existsSync(file)) {
-    throw new Error('Arquivo resultados-manuais.json não encontrado. Crie-o com [{"home","away","hg","ag"}, ...].');
+    throw new Error('Arquivo resultados-manuais.json não encontrado. Crie-o com [{"home","away","hg","ag"}, ...] (use "ph"/"pa" p/ pênaltis no mata-mata).');
   }
   var arr = JSON.parse(fs.readFileSync(file, 'utf-8'));
   var agenda = (arr || [])
     .filter(function (g) { return g && g.date; })
     .map(function (g) { return { home: g.home, away: g.away, date: g.date }; });
-  return { jogos: arr, agenda: agenda };
+  // Passa todos os jogos como candidatos de grupo E de mata-mata; cada etapa filtra o que é dela
+  // (grupo: confronto válido de grupo; mata-mata: confronto que existe no chaveamento).
+  var koJogos = (arr || []).map(function (g) {
+    return { home: g.home, away: g.away, hg: g.hg, ag: g.ag, ph: g.ph, pa: g.pa };
+  });
+  return { jogos: arr, koJogos: koJogos, agenda: agenda, koAgenda: agenda };
 }
 
 async function fetchResults() {
@@ -307,14 +518,16 @@ async function main() {
   console.log('→ buscando jogos e agenda...');
   var fonte = await fetchResults();
   var jogos = fonte.jogos || [];
+  var koJogos = fonte.koJogos || [];
   var agenda = fonte.agenda || [];
-  console.log('   ' + jogos.length + ' jogo(s) terminado(s) e ' + agenda.length + ' jogo(s) na agenda (com data).');
+  var koAgenda = fonte.koAgenda || [];
+  console.log('   ' + jogos.length + ' jogo(s) de grupo e ' + koJogos.length + ' de mata-mata terminados; ' + (agenda.length + koAgenda.length) + ' com data.');
 
   console.log('→ lendo resultados atuais do Firestore...');
   var snap = await fs.getDoc(ref);
   var current = snap.exists() ? snap.data() : {};
 
-  var out = mergeResults(current, jogos, { index: buildIndex(), sobrescrever: SOBRESCREVER, agenda: agenda });
+  var out = mergeResults(current, jogos, { index: buildIndex(), sobrescrever: SOBRESCREVER, agenda: agenda, koJogos: koJogos, koAgenda: koAgenda });
 
   if (out.errors.length) {
     console.log('\n⚠️  ' + out.errors.length + ' jogo(s) não mapeado(s) (provável diferença de nome — ignorados):');
@@ -346,7 +559,12 @@ async function main() {
 }
 
 /* exporta a lógica pura pra testes; só roda o main se chamado direto */
-module.exports = { norm: norm, buildIndex: buildIndex, mapGame: mapGame, calcStandings: calcStandings, mergeResults: mergeResults, lerConfig: lerConfig, GROUPS: GROUPS, MATCH_PAIRS: MATCH_PAIRS };
+module.exports = {
+  norm: norm, buildIndex: buildIndex, mapGame: mapGame, calcStandings: calcStandings,
+  mergeResults: mergeResults, lerConfig: lerConfig, GROUPS: GROUPS, MATCH_PAIRS: MATCH_PAIRS,
+  MATCH_LABELS_R32: MATCH_LABELS_R32, resolverColocacao: resolverColocacao, buildBracket: buildBracket,
+  koWinnerName: koWinnerName, koLoserName: koLoserName, mergeKnockout: mergeKnockout, placeKoDates: placeKoDates
+};
 
 if (require.main === module) {
   main().catch(function (e) {
