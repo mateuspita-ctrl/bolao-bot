@@ -33,16 +33,16 @@ O bot aceita 3 fontes (variável de ambiente `FONTE`):
 
 1. Crie uma conta grátis em **https://www.football-data.org/client/register**
 2. Você recebe um **token** (uma sequência de letras/números) por e-mail.
-3. **Jeito fácil:** abra o arquivo **`config.txt`** (com o Bloco de Notas / TextEdit), cole o seu token na linha `FOOTBALL_DATA_TOKEN=`, salve, e rode:
-
-```bash
-node bot-resultados.js
-```
-
-Pronto — não precisa mexer com variáveis de ambiente. (Se preferir, ainda dá pra passar por variável de ambiente, como abaixo; ela tem prioridade sobre o config.txt.)
+3. Rode assim (Linux/Mac):
 
 ```bash
 FONTE=football-data FOOTBALL_DATA_TOKEN=seu_token_aqui node bot-resultados.js
+```
+
+No Windows (PowerShell):
+
+```powershell
+$env:FONTE="football-data"; $env:FOOTBALL_DATA_TOKEN="seu_token_aqui"; node bot-resultados.js
 ```
 
 ### Opção B — openfootball (sem chave)
@@ -60,6 +60,23 @@ FONTE=manual node bot-resultados.js
 ```
 
 Os nomes dos times podem estar em **português** (igual ao app) ou **inglês** — o bot reconhece os dois.
+
+---
+
+## Mata-mata (16 avos até a final) — automático
+
+Quando a fase de grupos termina, o bot passa a pegar também os resultados do **mata-mata inteiro**: 16 avos, oitavas, quartas, semifinais, final e disputa de 3º lugar. Ele grava em `res.knockout` — o mesmo lugar que o app lê pra montar o chaveamento da galera, do resumo e da Etapa 3.
+
+**Como ele acha o confronto certo:** o bot reconstrói o chaveamento a partir da classificação dos grupos + dos resultados que já gravou, e descobre a rodada e o jogo de cada partida **pelos dois times**. Por isso funciona rodada a rodada — cada rodada só "abre" quando a anterior fecha (aí ele já sabe quem passou). Não importa qual seleção a fonte põe como mandante: o placar entra na ordem certa do app.
+
+**Pênaltis:** o placar gravado em `c`/`f` é sempre o do **fim da prorrogação** (o empate, quando o jogo é decidido nos pênaltis). O resultado do shootout vai pra `pc`/`pf` e serve **só pra saber quem avançou** no chaveamento — ele **não conta pontos**. A pontuação considera apenas os gols do tempo normal + prorrogação.
+- No `football-data` ele desconta os pênaltis sozinho. (Atenção técnica: o `fullTime` da API soma os gols do shootout no placar — ex.: 1-1 + pên 6-5 vira `fullTime` 7-6 — então o bot usa `regularTime + extraTime`, que é o placar real do fim da prorrogação.) Se a fonte informar só o vencedor (sem o placar das penalidades), o bot grava um `1 x 0` simbólico em `pc`/`pf` só pra o chaveamento avançar.
+- No `openfootball` ele usa o placar `et` (fim da prorrogação) quando há, senão o `ft` (90 min); os pênaltis ficam em `p`.
+- No **manual**, basta pôr `"ph"` e `"pa"` no jogo. Ex.: `{ "home": "Brasil", "away": "Japão", "hg": 1, "ag": 1, "ph": 4, "pa": 2 }` (hg/ag = empate da prorrogação; ph/pa = pênaltis).
+
+**Datas:** o bot também grava a data dos jogos do mata-mata (assim que os dois times do confronto são conhecidos). Isso faz a aba **Palpite da Galera** revelar o palpite dos outros sozinha quando a rodada começa.
+
+> Pra mata-mata sempre certo (inclusive pênaltis), prefira `football-data` (com token) ou `manual`. O `openfootball` funciona, mas pode demorar e nem sempre traz o placar dos pênaltis.
 
 ---
 
