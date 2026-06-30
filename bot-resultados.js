@@ -392,6 +392,21 @@ function mergeResults(current, jogos, opts) {
    ============================================================ */
 
 // football-data.org (precisa de chave grátis em football-data.org/client/register)
+// football-data: placar no FIM DA PRORROGAÇÃO (SEM pênaltis), a partir do score node.
+// Cuidado: em prorrogação/shootout o score.fullTime SOMA os pênaltis (ex.: 1-1 + pên 6-5 => fullTime 7-6).
+// Por isso, quando há regularTime (jogo que passou dos 90 min), usamos regularTime + extraTime, que nunca incluem pênaltis.
+function fdFimDaProrrogacao(score) {
+  if (!score) return { home: null, away: null };
+  if (score.regularTime && score.regularTime.home != null) {
+    var etH = (score.extraTime && score.extraTime.home != null) ? score.extraTime.home : 0;
+    var etA = (score.extraTime && score.extraTime.away != null) ? score.extraTime.away : 0;
+    return { home: score.regularTime.home + etH, away: score.regularTime.away + etA };
+  }
+  return (score.fullTime && score.fullTime.home != null)
+    ? { home: score.fullTime.home, away: score.fullTime.away }
+    : { home: null, away: null };
+}
+
 async function fetchFootballData() {
   if (!FOOTBALL_DATA_TOKEN || /COLE_SEU_TOKEN/i.test(FOOTBALL_DATA_TOKEN)) {
     throw new Error('Falta o token do football-data.org. Abra o arquivo config.txt e cole o seu token na linha FOOTBALL_DATA_TOKEN= (a chave grátis vem por e-mail; também aparece em football-data.org, na sua conta).');
@@ -413,18 +428,20 @@ async function fetchFootballData() {
       return { home: m.homeTeam.name, away: m.awayTeam.name, hg: m.score.fullTime.home, ag: m.score.fullTime.away };
     });
 
-  // MATA-MATA terminado (com pênaltis quando houver). c/f = placar no fim do tempo normal/prorrogação.
+  // MATA-MATA terminado. c/f = placar no FIM DA PRORROGAÇÃO, SEM pênaltis.
+  // (no football-data o fullTime soma o shootout, então fdFimDaProrrogacao usa regularTime + extraTime.)
   var koJogos = matches.filter(function (m) { return !ehGrupo(m) && terminou(m); })
     .map(function (m) {
+      var et = fdFimDaProrrogacao(m.score);
       var ph = null, pa = null;
       if (m.score.penalties && m.score.penalties.home != null) { ph = m.score.penalties.home; pa = m.score.penalties.away; }
       // Decidido nos pênaltis mas a fonte não trouxe o placar do shootout:
       // codifica só o vencedor (1x0) pra o chaveamento conseguir avançar.
-      if (ph == null && m.score.duration === 'PENALTY_SHOOTOUT' && m.score.winner) {
+      else if (m.score.duration === 'PENALTY_SHOOTOUT' && m.score.winner) {
         if (m.score.winner === 'HOME_TEAM') { ph = 1; pa = 0; }
         else if (m.score.winner === 'AWAY_TEAM') { ph = 0; pa = 1; }
       }
-      return { home: m.homeTeam.name, away: m.awayTeam.name, hg: m.score.fullTime.home, ag: m.score.fullTime.away, ph: ph, pa: pa };
+      return { home: m.homeTeam.name, away: m.awayTeam.name, hg: et.home, ag: et.away, ph: ph, pa: pa };
     });
 
   // Agenda (data/hora oficial, ISO) — separada em grupos e mata-mata.
@@ -454,14 +471,16 @@ async function fetchOpenFootball() {
     .filter(function (m) { return m.date; })
     .map(function (m) { return { home: m.team1, away: m.team2, date: m.date }; });
 
-  // MATA-MATA: jogos que NÃO são de grupo (rodadas eliminatórias). Pênaltis em score.p quando houver.
+  // MATA-MATA: jogos que NÃO são de grupo. Placar até o FIM DA PRORROGAÇÃO: usa score.et quando houve prorrogação;
+  // senão score.ft (90 min). Pênaltis ficam em score.p e NÃO entram no placar.
   var koMatches = todos.filter(function (m) { return !(m.group && /^Group/i.test(m.group)); });
   var koJogos = koMatches
-    .filter(function (m) { return m.score && m.score.ft && m.score.ft.length === 2 && m.team1 && m.team2; })
+    .filter(function (m) { return m.score && ((m.score.et && m.score.et.length === 2) || (m.score.ft && m.score.ft.length === 2)) && m.team1 && m.team2; })
     .map(function (m) {
       var ph = null, pa = null;
       if (m.score.p && m.score.p.length === 2) { ph = m.score.p[0]; pa = m.score.p[1]; }
-      return { home: m.team1, away: m.team2, hg: m.score.ft[0], ag: m.score.ft[1], ph: ph, pa: pa };
+      var sc = (m.score.et && m.score.et.length === 2) ? m.score.et : m.score.ft;
+      return { home: m.team1, away: m.team2, hg: sc[0], ag: sc[1], ph: ph, pa: pa };
     });
   var koAgenda = koMatches
     .filter(function (m) { return m.date && m.team1 && m.team2; })
@@ -563,7 +582,8 @@ module.exports = {
   norm: norm, buildIndex: buildIndex, mapGame: mapGame, calcStandings: calcStandings,
   mergeResults: mergeResults, lerConfig: lerConfig, GROUPS: GROUPS, MATCH_PAIRS: MATCH_PAIRS,
   MATCH_LABELS_R32: MATCH_LABELS_R32, resolverColocacao: resolverColocacao, buildBracket: buildBracket,
-  koWinnerName: koWinnerName, koLoserName: koLoserName, mergeKnockout: mergeKnockout, placeKoDates: placeKoDates
+  koWinnerName: koWinnerName, koLoserName: koLoserName, mergeKnockout: mergeKnockout, placeKoDates: placeKoDates,
+  fdFimDaProrrogacao: fdFimDaProrrogacao, fetchOpenFootball: fetchOpenFootball
 };
 
 if (require.main === module) {
